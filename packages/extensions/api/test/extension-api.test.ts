@@ -6,10 +6,22 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  type ExtensionThemeDefinition,
   ExtensionRegistrationError,
   TerminalExtensionHost,
   type TerminalExtension,
 } from "../src/index.ts";
+
+function themeFixture(id = "fixture-theme"): ExtensionThemeDefinition {
+  return {
+    version: 1,
+    id,
+    label: "Fixture Theme",
+    appearance: "dark",
+    inherits: "axl-dark",
+    foregrounds: { accent: "#112233" },
+  };
+}
 
 function fixture(state: {
   activations: number;
@@ -27,6 +39,7 @@ function fixture(state: {
         "terminal.widgets",
         "terminal.events",
         "terminal.tool-renderers",
+        "terminal.themes",
       ],
     },
     activate(api) {
@@ -50,6 +63,7 @@ function fixture(state: {
         },
       });
       api.registerToolRenderer("fixture", () => ({ label: "FIXTURE" }));
+      api.registerTheme(themeFixture());
       api.on("working.start", () => {
         state.events += 1;
       });
@@ -74,12 +88,15 @@ test("reload and disable remove every extension-owned registration and resource"
   assert.equal(host.widgets("aboveEditor").length, 1);
   assert.equal(host.workingLabel(), "Checking fixture");
   assert.equal(host.toolRenderer("fixture")?.extensionId, "test.fixture");
+  assert.equal(host.themes().length, 1);
+  assert.equal(host.themes()[0]?.theme.id, "fixture-theme");
   assert.deepEqual(await host.emit({ type: "working.start" }), []);
   assert.equal(state.events, 1);
 
   await host.deactivate("test.fixture");
   assert.equal(state.cleanups, 3);
   assert.equal(host.commands().length, 0);
+  assert.equal(host.themes().length, 0);
   assert.deepEqual(host.extensionStates(), [{ id: "test.fixture", active: false }]);
 
   await host.activateExtension("test.fixture");
@@ -89,6 +106,7 @@ test("reload and disable remove every extension-owned registration and resource"
   assert.equal(state.cleanups, 6);
   assert.equal(host.commands().length, 1);
   assert.equal(host.widgets("aboveEditor").length, 1);
+  assert.equal(host.themes().length, 1);
 
   await host.dispose();
   assert.equal(state.cleanups, 9);
@@ -98,6 +116,7 @@ test("reload and disable remove every extension-owned registration and resource"
   assert.equal(host.widgets("aboveEditor").length, 0);
   assert.equal(host.toolRenderer("fixture"), undefined);
   assert.equal(host.workingLabel(), undefined);
+  assert.equal(host.themes().length, 0);
   assert.equal(state.events, 1);
 });
 
@@ -117,6 +136,54 @@ test("disabling one extension preserves sibling registrations", async () => {
   assert.equal(host.toolRenderer("first"), undefined);
   assert.equal(host.toolRenderer("second")?.extensionId, "test.second");
   await host.dispose();
+});
+
+test("registerTheme requires its capability and rejects duplicate ids", async () => {
+  const host = new TerminalExtensionHost([
+    {
+      manifest: { id: "test.undeclared", name: "Undeclared", capabilities: [] },
+      activate(api) {
+        api.registerTheme(themeFixture());
+      },
+    },
+  ]);
+  await assert.rejects(() => host.activate(), /did not declare capability terminal\.themes/);
+
+  const duplicateHost = new TerminalExtensionHost([
+    {
+      manifest: { id: "test.first", name: "First", capabilities: ["terminal.themes"] },
+      activate(api) {
+        api.registerTheme(themeFixture("shared"));
+      },
+    },
+    {
+      manifest: { id: "test.second", name: "Second", capabilities: ["terminal.themes"] },
+      activate(api) {
+        api.registerTheme(themeFixture("shared"));
+      },
+    },
+  ]);
+  await assert.rejects(() => duplicateHost.activate(), /Theme shared is already registered/);
+});
+
+test("registerTheme runs the host-supplied validator and rejects invalid themes", async () => {
+  const host = new TerminalExtensionHost(
+    [
+      {
+        manifest: { id: "test.themed", name: "Themed", capabilities: ["terminal.themes"] },
+        activate(api) {
+          api.registerTheme(themeFixture());
+        },
+      },
+    ],
+    {
+      validateTheme: (theme) => {
+        throw new Error(`rejected ${theme.id}`);
+      },
+    },
+  );
+  await assert.rejects(() => host.activate(), /rejected fixture-theme/);
+  assert.equal(host.themes().length, 0);
 });
 
 test("disposed extension APIs cannot register new resources", async () => {

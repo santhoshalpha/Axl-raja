@@ -225,6 +225,50 @@ function decode(bytes: Uint8Array, path: string): string {
   }
 }
 
+function parseThemeDefinition(
+  input: Record<string, unknown>,
+  path: string,
+  id: string,
+  idSource: "the filename" | "the declared theme id",
+  origin: "global" | "project" | "extension",
+): ThemeDefinition {
+  const allowed = new Set([
+    "version",
+    "id",
+    "label",
+    "appearance",
+    "inherits",
+    "foregrounds",
+    "backgrounds",
+    "pairs",
+    "thinking",
+  ]);
+  const unknown = Object.keys(input).find((key) => !allowed.has(key));
+  if (unknown !== undefined)
+    throw new ThemeValidationError(`${path}.${unknown}`, "is not supported");
+  if (input.version !== 1) throw new ThemeValidationError(`${path}.version`, "must be 1");
+  if (string(input.id, `${path}.id`) !== id) {
+    throw new ThemeValidationError(`${path}.id`, `must match ${idSource}`);
+  }
+  const appearance = string(input.appearance, `${path}.appearance`);
+  if (!APPEARANCES.has(appearance)) {
+    throw new ThemeValidationError(`${path}.appearance`, "is not supported");
+  }
+  const inherited = string(input.inherits, `${path}.inherits`);
+  const base = THEMES[inherited];
+  if (base === undefined) {
+    throw new ThemeValidationError(`${path}.inherits`, "must name a built-in theme");
+  }
+  return {
+    version: 1,
+    id,
+    label: string(input.label, `${path}.label`),
+    appearance: appearance as ThemeDefinition["appearance"],
+    palette: compilePalette(input, path, base),
+    origin,
+  };
+}
+
 async function loadTheme(
   path: string,
   fileName: string,
@@ -255,40 +299,54 @@ async function loadTheme(
     throw new ThemeValidationError(path, `contains invalid JSON: ${String(cause)}`);
   }
   const input = object(parsed, path);
-  const allowed = new Set([
-    "version",
-    "id",
-    "label",
-    "appearance",
-    "inherits",
-    "foregrounds",
-    "backgrounds",
-    "pairs",
-    "thinking",
-  ]);
-  const unknown = Object.keys(input).find((key) => !allowed.has(key));
-  if (unknown !== undefined)
-    throw new ThemeValidationError(`${path}.${unknown}`, "is not supported");
-  if (input.version !== 1) throw new ThemeValidationError(`${path}.version`, "must be 1");
-  if (string(input.id, `${path}.id`) !== id) {
-    throw new ThemeValidationError(`${path}.id`, "must match the filename");
+  return parseThemeDefinition(input, path, id, "the filename", origin);
+}
+
+/**
+ * Validates and compiles an extension-supplied theme (see `ExtensionThemeDefinition` in
+ * `@axl/extension-api`), reusing the same role, bounds, and built-in-protection rules as
+ * file-based custom themes. Called both as the extension host's registration-time
+ * validator and again when merging accepted registrations into the theme catalog.
+ */
+export function compileExtensionTheme(theme: unknown, extensionId: string): ThemeDefinition {
+  const path = `extension ${extensionId} theme`;
+  const input = object(theme, path);
+  const id = string(input.id, `${path}.id`);
+  if (!THEME_ID.test(id)) {
+    throw new ThemeValidationError(
+      `${path}.id`,
+      "must start with a lowercase letter and contain lowercase letters, digits, or single hyphens",
+    );
   }
-  const appearance = string(input.appearance, `${path}.appearance`);
-  if (!APPEARANCES.has(appearance)) {
-    throw new ThemeValidationError(`${path}.appearance`, "is not supported");
-  }
-  const inherited = string(input.inherits, `${path}.inherits`);
-  const base = THEMES[inherited];
-  if (base === undefined) {
-    throw new ThemeValidationError(`${path}.inherits`, "must name a built-in theme");
-  }
+  if (BUILTIN_IDS.has(id))
+    throw new ThemeValidationError(path, `cannot replace built-in theme ${id}`);
+  const size = new TextEncoder().encode(JSON.stringify(input)).byteLength;
+  if (size > MAX_THEME_BYTES)
+    throw new ThemeValidationError(path, `exceeds ${MAX_THEME_BYTES} bytes`);
+  return parseThemeDefinition(input, path, id, "the declared theme id", "extension");
+}
+
+/**
+ * Merges compiled extension themes into a loaded catalog. Extension themes are lowest
+ * precedence: a built-in or file-based (project/global) theme with the same id always wins.
+ */
+export function mergeExtensionThemes(
+  catalog: ThemeCatalog,
+  extensionThemes: readonly ThemeDefinition[],
+): ThemeCatalog {
+  const known = new Set(catalog.definitions.map((theme) => theme.id));
+  const additions = extensionThemes.filter(
+    (theme) => !BUILTIN_IDS.has(theme.id) && !known.has(theme.id),
+  );
+  if (additions.length === 0) return catalog;
+  const customAndExtension = [
+    ...catalog.definitions.slice(THEME_DEFINITIONS.length),
+    ...additions,
+  ].sort((left, right) => left.id.localeCompare(right.id));
+  const definitions = [...THEME_DEFINITIONS, ...customAndExtension];
   return {
-    version: 1,
-    id,
-    label: string(input.label, `${path}.label`),
-    appearance: appearance as ThemeDefinition["appearance"],
-    palette: compilePalette(input, path, base),
-    origin,
+    definitions,
+    palettes: Object.fromEntries(definitions.map((theme) => [theme.id, theme.palette])),
   };
 }
 

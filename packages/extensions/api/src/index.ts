@@ -8,7 +8,8 @@ export type ExtensionCapability =
   | "terminal.status"
   | "terminal.widgets"
   | "terminal.events"
-  | "terminal.tool-renderers";
+  | "terminal.tool-renderers"
+  | "terminal.themes";
 
 export interface ExtensionManifest {
   readonly id: string;
@@ -90,6 +91,25 @@ export type TerminalExtensionEvent = TerminalExtensionEventInput & {
   readonly signal: AbortSignal;
 };
 
+/**
+ * Mirrors the on-disk custom theme JSON schema (see `packages/tui/src/custom-themes.ts`)
+ * so a validated definition can cross the extension-api boundary without this package
+ * depending on TUI internals.
+ */
+export interface ExtensionThemeDefinition {
+  readonly version: 1;
+  readonly id: string;
+  readonly label: string;
+  readonly appearance: "dark" | "light" | "system" | "accessible" | "plain";
+  readonly inherits: string;
+  readonly foregrounds?: Readonly<Record<string, string | number>>;
+  readonly backgrounds?: Readonly<Record<string, string | number>>;
+  readonly pairs?: Readonly<
+    Record<string, { readonly foreground: string | number; readonly background: string | number }>
+  >;
+  readonly thinking?: Readonly<Record<string, string | number>>;
+}
+
 export type ExtensionDisposer = () => void | Promise<void>;
 
 export interface TerminalExtensionApi {
@@ -99,6 +119,7 @@ export interface TerminalExtensionApi {
   registerWorkingLabel(label: string): ExtensionDisposer;
   registerWidget(key: string, widget: TerminalWidget): ExtensionDisposer;
   registerToolRenderer(toolName: string, renderer: TerminalToolRenderer): ExtensionDisposer;
+  registerTheme(theme: ExtensionThemeDefinition): ExtensionDisposer;
   on(
     event: TerminalExtensionEventInput["type"],
     handler: (event: TerminalExtensionEvent) => void | Promise<void>,
@@ -126,6 +147,21 @@ export interface OwnedTerminalToolRenderer {
   readonly renderer: TerminalToolRenderer;
 }
 
+export interface OwnedExtensionTheme {
+  readonly extensionId: string;
+  readonly theme: ExtensionThemeDefinition;
+}
+
+/**
+ * Validates an extension-supplied theme, throwing on invalid data. Supplied by the host
+ * client (the TUI) so `registerTheme` reuses real theme validation without this package
+ * depending on TUI internals.
+ */
+export type ExtensionThemeValidator = (
+  theme: ExtensionThemeDefinition,
+  extensionId: string,
+) => void;
+
 interface OwnedStatus {
   readonly extensionId: string;
   readonly line: TerminalLine;
@@ -143,6 +179,7 @@ interface OwnedListener {
 
 export interface TerminalExtensionHostOptions {
   readonly cleanupTimeoutMs?: number;
+  readonly validateTheme?: ExtensionThemeValidator;
 }
 
 interface OwnedDisposer {
@@ -197,6 +234,7 @@ export class TerminalExtensionHost {
   private readonly statusesByKey = new Map<string, OwnedStatus>();
   private readonly widgetsByKey = new Map<string, OwnedWidget>();
   private readonly toolRenderersByName = new Map<string, OwnedTerminalToolRenderer>();
+  private readonly themesById = new Map<string, OwnedExtensionTheme>();
   private readonly listenersByEvent = new Map<
     TerminalExtensionEventInput["type"],
     Set<OwnedListener>
@@ -209,12 +247,14 @@ export class TerminalExtensionHost {
   private readonly cleanupTimeoutMs: number;
   private widgetRevisionValue = 0;
   private active = false;
+  private readonly validateTheme: ExtensionThemeValidator | undefined;
 
   constructor(
     definitions: readonly TerminalExtension[] = [],
     options: TerminalExtensionHostOptions = {},
   ) {
     this.definitions = [...definitions];
+    this.validateTheme = options.validateTheme;
     this.cleanupTimeoutMs = options.cleanupTimeoutMs ?? DEFAULT_CLEANUP_TIMEOUT_MS;
     if (!Number.isSafeInteger(this.cleanupTimeoutMs) || this.cleanupTimeoutMs < 1) {
       throw new ExtensionRegistrationError("cleanupTimeoutMs must be a positive integer");
@@ -372,6 +412,10 @@ export class TerminalExtensionHost {
     return this.toolRenderersByName.get(name);
   }
 
+  themes(): readonly OwnedExtensionTheme[] {
+    return [...this.themesById.values()];
+  }
+
   async emit(input: TerminalExtensionEventInput): Promise<readonly Error[]> {
     if (!this.active) return [];
     const tasks: Promise<Error | undefined>[] = [];
@@ -500,6 +544,20 @@ export class TerminalExtensionHost {
         return own(() => {
           if (this.toolRenderersByName.get(toolName) === owned) {
             this.toolRenderersByName.delete(toolName);
+          }
+        });
+      },
+      registerTheme: (theme) => {
+        requireCapability("terminal.themes");
+        this.validateTheme?.(theme, extensionId);
+        if (this.themesById.has(theme.id)) {
+          throw new ExtensionRegistrationError(`Theme ${theme.id} is already registered`);
+        }
+        const owned = { extensionId, theme };
+        this.themesById.set(theme.id, owned);
+        return own(() => {
+          if (this.themesById.get(theme.id) === owned) {
+            this.themesById.delete(theme.id);
           }
         });
       },

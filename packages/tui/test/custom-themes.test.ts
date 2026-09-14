@@ -7,7 +7,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { loadThemeCatalog, watchThemeDirectories } from "../src/custom-themes.ts";
+import {
+  compileExtensionTheme,
+  loadThemeCatalog,
+  mergeExtensionThemes,
+  watchThemeDirectories,
+} from "../src/custom-themes.ts";
 
 function source(id: string, accent: string, label = id): string {
   return `${JSON.stringify(
@@ -108,4 +113,68 @@ test("watches existing user theme directories", async (context) => {
   await until(() => changes > 0, "theme watcher");
   const catalog = await loadThemeCatalog({ cwd: root, globalDirectory });
   assert.match(catalog.palettes.violet?.accent("x") ?? "", /38;2;171;205;239m/);
+});
+
+function extensionTheme(id: string, accent: string): unknown {
+  return {
+    version: 1,
+    id,
+    label: id,
+    appearance: "dark",
+    inherits: "axl-dark",
+    foregrounds: { accent },
+  };
+}
+
+test("compiles a valid extension theme and rejects invalid ones", () => {
+  const compiled = compileExtensionTheme(extensionTheme("plugin-violet", "#abcdef"), "test.ext");
+  assert.equal(compiled.id, "plugin-violet");
+  assert.equal(compiled.origin, "extension");
+  assert.match(compiled.palette.accent("x"), /38;2;171;205;239m/);
+
+  assert.throws(
+    () => compileExtensionTheme(extensionTheme("axl-dark", "#abcdef"), "test.ext"),
+    /cannot replace built-in theme/,
+  );
+  assert.throws(
+    () => compileExtensionTheme(extensionTheme("Not Valid", "#abcdef"), "test.ext"),
+    /must start with a lowercase letter/,
+  );
+  assert.throws(
+    () =>
+      compileExtensionTheme(
+        {
+          version: 1,
+          id: "surprise",
+          label: "x",
+          appearance: "dark",
+          inherits: "axl-dark",
+          foregrounds: { surprise: "#ffffff" },
+        },
+        "test.ext",
+      ),
+    /is not a color role/,
+  );
+});
+
+test("merges extension themes at lowest precedence", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "axl-themes-ext-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const cwd = join(root, "workspace");
+  await put(join(cwd, ".axl", "themes"), "shared", source("shared", "#111111"));
+
+  const catalog = await loadThemeCatalog({ cwd });
+  const extensionThemes = [
+    compileExtensionTheme(extensionTheme("plugin-only", "#222222"), "test.ext"),
+    compileExtensionTheme(extensionTheme("shared", "#333333"), "test.ext"),
+  ];
+  const merged = mergeExtensionThemes(catalog, extensionThemes);
+
+  const pluginTheme = merged.definitions.find((theme) => theme.id === "plugin-only");
+  assert.equal(pluginTheme?.origin, "extension");
+  assert.match(merged.palettes["plugin-only"]?.accent("x") ?? "", /38;2;34;34;34m/);
+
+  const sharedTheme = merged.definitions.find((theme) => theme.id === "shared");
+  assert.equal(sharedTheme?.origin, "project");
+  assert.match(merged.palettes.shared?.accent("x") ?? "", /38;2;17;17;17m/);
 });

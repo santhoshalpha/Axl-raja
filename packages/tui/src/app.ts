@@ -55,7 +55,13 @@ import {
 import { ActivityComponent } from "./activity.ts";
 import { droppedImages, type LocalAttachment, readImageFile } from "./attachments.ts";
 import { type ClipboardContent, readClipboard, writeClipboardText } from "./clipboard.ts";
-import { loadThemeCatalog, type ThemeCatalog, watchThemeDirectories } from "./custom-themes.ts";
+import {
+  compileExtensionTheme,
+  loadThemeCatalog,
+  mergeExtensionThemes,
+  type ThemeCatalog,
+  watchThemeDirectories,
+} from "./custom-themes.ts";
 import { DeveloperPanelComponent } from "./developer-panel.ts";
 import { renderDialog } from "./dialog.ts";
 import {
@@ -747,7 +753,11 @@ export class AxlApp {
         this.mediaCache.rows(reference, mediaWidth, this.tuiMode === "fullscreen", mediaPalette),
     );
     this.view.toolOutputDisplay = options.toolOutputDisplay ?? "compact";
-    this.extensionHost = new TerminalExtensionHost(options.extensions);
+    this.extensionHost = new TerminalExtensionHost(options.extensions, {
+      validateTheme: (theme, extensionId) => {
+        compileExtensionTheme(theme, extensionId);
+      },
+    });
     this.extensionWidgetsAbove = new ExtensionWidgetsComponent(
       this.extensionHost,
       "aboveEditor",
@@ -1019,6 +1029,17 @@ export class AxlApp {
         throw new Error(
           `Extension ${conflictingShortcut.extensionId} conflicts with a reserved terminal shortcut`,
         );
+      }
+      const extensionThemes = app.extensionHost
+        .themes()
+        .map(({ theme, extensionId }) => compileExtensionTheme(theme, extensionId));
+      if (extensionThemes.length > 0) {
+        const merged = mergeExtensionThemes(
+          { definitions: app.themeDefinitions, palettes: app.themes },
+          extensionThemes,
+        );
+        app.themeDefinitions = merged.definitions;
+        app.themes = merged.palettes;
       }
     } catch (error) {
       try {
@@ -3433,13 +3454,18 @@ export class AxlApp {
     if (this.options.color === false) return;
     const generation = ++this.themeReloadGeneration;
     try {
-      const catalog = await loadThemeCatalog({
+      const loaded = await loadThemeCatalog({
         cwd: this.cwd,
         ...(this.options.globalThemeDirectory === undefined
           ? {}
           : { globalDirectory: this.options.globalThemeDirectory }),
       });
       if (this.stopped || generation !== this.themeReloadGeneration) return;
+      const extensionThemes = this.extensionHost
+        .themes()
+        .map(({ theme, extensionId }) => compileExtensionTheme(theme, extensionId));
+      const catalog =
+        extensionThemes.length === 0 ? loaded : mergeExtensionThemes(loaded, extensionThemes);
       const palette = catalog.palettes[this.currentTheme];
       if (palette === undefined)
         throw new Error(`Active theme ${this.currentTheme} is unavailable`);

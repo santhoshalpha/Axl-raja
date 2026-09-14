@@ -357,7 +357,7 @@ export interface ThemeDefinition {
   readonly label: string;
   readonly appearance: "dark" | "light" | "system" | "accessible" | "plain";
   readonly palette: Palette;
-  readonly origin?: "global" | "project";
+  readonly origin?: "global" | "project" | "extension";
 }
 
 export const THEME_DEFINITIONS: readonly ThemeDefinition[] = [
